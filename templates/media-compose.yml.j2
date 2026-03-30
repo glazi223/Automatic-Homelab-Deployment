@@ -1,0 +1,75 @@
+version: "3.8"
+services:
+  jellyfin:
+    image: jellyfin/jellyfin
+    container_name: jellyfin
+    # network_mode: host  # Pro demo na maturitu raději bridge + porty
+    environment:
+      - TZ={{ system_timezone }}
+    volumes:
+      - /opt/media/jellyfin/config:/config
+      - /opt/media/data:/data
+    ports:
+      - 8096:8096
+    restart: unless-stopped
+
+  radarr:
+    image: linuxserver/radarr
+    container_name: radarr
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ={{ system_timezone }}
+    volumes:
+      - /opt/media/radarr/config:/config
+      - /opt/media/data:/data
+    ports:
+      - 7878:7878
+    restart: unless-stopped
+
+  # ... Sonarr, Jackett a qBittorrent zůstávají podobně, 
+  # jen u TZ použijeme {{ system_timezone }} ...
+
+  sonarr:
+    image: linuxserver/sonarr
+    container_name: sonarr
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Prague
+    volumes:
+      - /opt/media/sonarr/config:/config
+      - /opt/media/data:/data
+    ports:
+      - 8989:8989
+    restart: unless-stopped
+
+  jackett:
+    image: linuxserver/jackett
+    container_name: jackett
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Prague
+    volumes:
+      - /opt/media/jackett/config:/config
+    ports:
+      - 9117:9117
+    restart: unless-stopped
+
+  qbittorrent:
+    image: linuxserver/qbittorrent
+    container_name: qbittorrent
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Prague
+      - WEBUI_PORT=8080
+    volumes:
+      - /opt/media/qbittorrent/config:/config
+      - /opt/media/data/downloads:/downloads
+    ports:
+      - 8080:8080
+      - 6881:6881
+      - 6881:6881/udp
+    restart: unless-stopped

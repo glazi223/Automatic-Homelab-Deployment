@@ -1,0 +1,46 @@
+---
+- name: Deploy Minecraft Server with Playit.gg Tunnel
+  hosts: minecraft_vm
+  become: yes
+  gather_facts: false
+  tasks:
+    - name: Wait for Minecraft VM to be reachable
+      wait_for_connection:
+        delay: 10
+        timeout: 180
+
+    - name: Gather facts
+      setup:
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install Docker and Docker Compose
+      apt:
+        name:
+          - docker.io
+          - docker-compose-v2
+        state: present
+
+    - name: Ensure Docker service is running
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Create Minecraft directory
+      file:
+        path: /opt/minecraft/data
+        state: directory
+        mode: '0777'
+
+    - name: Deploy docker-compose.yml for Minecraft
+      template:
+        src: ../templates/minecraft-compose.yml.j2
+        dest: /opt/minecraft/docker-compose.yml
+
+    - name: Start Minecraft and Playit.gg Tunnel
+      command: docker compose up -d
+      args:
+        chdir: /opt/minecraft

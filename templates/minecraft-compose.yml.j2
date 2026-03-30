@@ -1,0 +1,25 @@
+version: "3.8"
+
+services:
+  minecraft:
+    image: itzg/minecraft-server
+    container_name: minecraft
+    environment:
+      EULA: "TRUE"
+      TYPE: "PAPER"
+      VERSION: "LATEST"
+      MEMORY: "4G"
+      USE_AIKAR_FLAGS: "YES"
+    ports:
+      - "25565:25565"
+    volumes:
+      - /opt/minecraft/data:/data
+    restart: unless-stopped
+
+  playit:
+    image: ghcr.io/playit-cloud/playit-agent:latest
+    container_name: playit
+    network_mode: host
+    environment:
+      - SECRET_KEY={{ playit_secret_key }}
+    restart: unless-stopped

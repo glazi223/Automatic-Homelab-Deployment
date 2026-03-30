@@ -1,0 +1,524 @@
+---
+# ==============================================================================
+# 1. ADGUARD HOME (LXC)
+# ==============================================================================
+- name: Setup AdGuard Home
+  hosts: adguard_ct
+  become: yes
+  gather_facts: false
+  tasks:
+    - name: Wait for AdGuard LXC to be reachable
+      wait_for_connection:
+        delay: 5
+        timeout: 120
+
+    - name: Gather facts
+      setup:
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Disable systemd-resolved (conflicts with AdGuard port 53)
+      systemd:
+        name: systemd-resolved
+        state: stopped
+        enabled: no
+
+    - name: Fix resolv.conf after killing systemd-resolved
+      copy:
+        dest: /etc/resolv.conf
+        content: "nameserver 1.1.1.1\n"
+
+    - name: Set system timezone dynamically
+      timezone:
+        name: "{{ system_timezone }}"
+
+    - name: Download AdGuard Home binary
+      get_url:
+        url: https://github.com/AdguardTeam/AdGuardHome/releases/latest/download/AdGuardHome_linux_amd64.tar.gz
+        dest: /opt/AdGuardHome.tar.gz
+
+    - name: Extract AdGuard Home to /opt
+      unarchive:
+        src: /opt/AdGuardHome.tar.gz
+        dest: /opt/
+        remote_src: yes
+
+    - name: Install AdGuard Home as service
+      shell: /opt/AdGuardHome/AdGuardHome -s install
+      args:
+        creates: /etc/systemd/system/AdGuardHome.service
+
+    - name: Stop AdGuard before uploading config
+      systemd:
+        name: AdGuardHome
+        state: stopped
+
+    - name: Generate AdGuard hash locally (bypass broken passlib on Arch)
+      shell: "python3 -c 'import bcrypt; print(bcrypt.hashpw(b\"{{ admin_password }}\", bcrypt.gensalt()).decode())'"
+      register: adguard_hash_result
+      delegate_to: localhost
+      become: no  # <--- Tohle je důležité! Spustí se to pod tvým uživatelem bez sudo.
+      run_once: true
+
+    - name: Deploy AdGuardHome.yaml from template
+      template:
+        src: ../templates/AdGuardHome.yaml.j2
+        dest: /opt/AdGuardHome/AdGuardHome.yaml
+        owner: root
+        group: root
+        mode: '0644'
+      # Tady become: yes nechej (zdědí se z vrchu), protože na kontejneru zápis do /opt práva vyžaduje.
+
+    - name: Ensure correct permissions
+      file:
+        path: /opt/AdGuardHome
+        owner: root
+        group: root
+        recurse: yes
+
+    - name: Start AdGuard with new config
+      systemd:
+        name: AdGuardHome
+        state: started
+        enabled: yes
+
+# ==============================================================================
+# 2. NEXTCLOUD (LXC)
+# ==============================================================================
+- name: Setup Nextcloud
+  hosts: nextcloud_ct
+  become: yes
+  gather_facts: false
+  tasks:
+    - name: Wait for Nextcloud LXC to be reachable
+      wait_for_connection:
+        delay: 5
+        timeout: 120
+
+    - name: Gather facts
+      setup:
+
+    - name: Update apt cache and install Docker
+      apt:
+        name:
+          - docker.io
+          - docker-compose-v2
+        state: present
+        update_cache: yes
+
+    - name: Ensure Docker is running
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Create Nextcloud directory
+      file:
+        path: /opt/nextcloud
+        state: directory
+        mode: '0755'
+
+    - name: Deploy Nextcloud docker-compose
+      copy:
+        dest: /opt/nextcloud/docker-compose.yml
+        content: |
+          version: "3.8"
+          services:
+            db:
+              image: mariadb:10.11
+              container_name: nextcloud-db
+              restart: unless-stopped
+              environment:
+                MYSQL_ROOT_PASSWORD: "{{ db_password }}"
+                MYSQL_DATABASE: nextcloud
+                MYSQL_USER: nextcloud
+                MYSQL_PASSWORD: "{{ db_password }}"
+              volumes:
+                - /opt/nextcloud/db:/var/lib/mysql
+
+            nextcloud:
+              image: nextcloud:latest
+              container_name: nextcloud
+              restart: unless-stopped
+              ports:
+                - "80:80"
+              environment:
+                MYSQL_HOST: db
+                MYSQL_DATABASE: nextcloud
+                MYSQL_USER: nextcloud
+                MYSQL_PASSWORD: "{{ db_password }}"
+                NEXTCLOUD_ADMIN_USER: "{{ admin_user }}"
+                NEXTCLOUD_ADMIN_PASSWORD: "{{ admin_password }}"
+                NEXTCLOUD_TRUSTED_DOMAINS: "storage.{{ domain_name }}"
+              volumes:
+                - /opt/nextcloud/data:/var/www/html
+              depends_on:
+                - db
+
+    - name: Disable AppArmor inside Nextcloud LXC
+      shell: |
+        apt remove -y apparmor || true
+        systemctl stop apparmor || true
+        systemctl disable apparmor || true
+        rm -f /etc/docker/daemon.json
+      ignore_errors: yes
+
+    - name: Restart Docker
+      systemd:
+        name: docker
+        state: restarted
+
+    - name: Start Nextcloud
+      command: docker compose up -d
+      args:
+        chdir: /opt/nextcloud
+
+# ==============================================================================
+# 3. MEDIA STACK & CLOUDFLARE (VM)
+# ==============================================================================
+- name: Setup Media Stack and Cloudflare
+  hosts: media_vm
+  become: yes
+  gather_facts: false
+  tasks:
+    - name: Wait for Media VM to be reachable
+      wait_for_connection:
+        delay: 10
+        timeout: 180
+
+    - name: Gather facts
+      setup:
+
+    - name: Update apt cache and install Docker
+      apt:
+        name:
+          - docker.io
+          - docker-compose-v2
+        state: present
+        update_cache: yes
+
+    - name: Ensure Docker service is running
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Create Media directory structure
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0777'
+      loop:
+        - /opt/media/data/movies
+        - /opt/media/data/tv
+        - /opt/media/data/downloads
+        - /opt/media/jellyfin/config
+        - /opt/media/radarr/config
+        - /opt/media/sonarr/config
+        - /opt/media/jackett/config
+        - /opt/media/jackett/config/Jackett/Indexers
+        - /opt/media/qbittorrent/config/qBittorrent # Důležité pro konfig qbitu
+
+    - name: Deploy application configs from templates
+      template:
+        src: "../templates/{{ item.src }}"
+        dest: "{{ item.dest }}"
+        mode: '0644'
+      loop:
+        - { src: 'radarr_config.xml.j2', dest: '/opt/media/radarr/config/config.xml' }
+        - { src: 'sonarr_config.xml.j2', dest: '/opt/media/sonarr/config/config.xml' }
+        - { src: 'jackett_config.json.j2', dest: '/opt/media/jackett/config/Jackett/ServerConfig.json' } 
+        - { src: 'qbittorrent.conf.j2', dest: '/opt/media/qbittorrent/config/qBittorrent/qBittorrent.conf' }
+        - { src: 'media-compose.yml.j2', dest: '/opt/media/docker-compose.yml' }
+
+    - name: Copy Jackett Indexers
+      copy:
+        src: ../files/indexers/
+        dest: /opt/media/jackett/config/Jackett/Indexers/ # <-- Přidáno /Jackett/
+        mode: '0644'
+
+    - name: Start Media Stack via Docker Compose
+      command: docker compose up -d
+      args:
+        chdir: /opt/media
+
+    # --- CLOUDFLARE TUNNEL ---
+    - name: Download Cloudflared binary
+      get_url:
+        url: https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+        dest: /usr/local/bin/cloudflared
+        mode: '0755'
+
+    - name: Create Cloudflared config directory
+      file:
+        path: /etc/cloudflared
+        state: directory
+
+    - name: Generate Cloudflare config.yml
+      template:
+        src: ../templates/cf-config.yml.j2
+        dest: /etc/cloudflared/config.yml
+
+    - name: Write cloudflared systemd unit
+      copy:
+        dest: /etc/systemd/system/cloudflared.service
+        content: |
+          [Unit]
+          Description=Cloudflare Tunnel
+          After=network.target
+
+          [Service]
+          Type=simple
+          ExecStart=/usr/local/bin/cloudflared tunnel run --token {{ tunnel_token }}
+          Restart=on-failure
+          RestartSec=5s
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Push ingress config to Cloudflare API
+      uri:
+        url: "https://api.cloudflare.com/client/v4/accounts/{{ cloudflare_account_id }}/cfd_tunnel/{{ tunnel_id }}/configurations"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ cloudflare_api_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          config:
+            ingress:
+              - hostname: "storage.{{ domain_name }}"
+                service: "http://{{ hostvars['nextcloud_ct']['ansible_host'] }}:80"
+              - hostname: "dns.{{ domain_name }}"
+                service: "http://{{ hostvars['adguard_ct']['ansible_host'] }}:80"
+              - hostname: "media.{{ domain_name }}"
+                service: "http://localhost:8096"
+              - hostname: "movies.{{ domain_name }}"
+                service: "http://localhost:7878"
+              - hostname: "shows.{{ domain_name }}"
+                service: "http://localhost:8989"
+              - service: "http_status:404"
+        status_code: 200
+
+    - name: Create DNS routes via Cloudflare API
+      uri:
+        url: "https://api.cloudflare.com/client/v4/zones/{{ cloudflare_zone_id }}/dns_records"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ cloudflare_api_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          type: "CNAME"
+          name: "{{ item }}.{{ domain_name }}"
+          content: "{{ tunnel_id }}.cfargotunnel.com"
+          proxied: true
+        status_code: [200, 400]  # 400 = already exists, that's fine
+      loop:
+        - storage
+        - dns
+        - media
+        - movies
+        - shows
+      ignore_errors: yes
+
+    - name: Start and enable Cloudflare Tunnel
+      systemd:
+        daemon_reload: yes
+        name: cloudflared
+        state: started
+        enabled: yes
+
+    # ==========================================
+    # --- ZERO-TOUCH API KONFIGURACE RADARRU ---
+    # ==========================================
+    - name: Wait for Radarr API
+      uri:
+        url: "http://localhost:7878/api/v3/system/status"
+        headers:
+          X-Api-Key: "{{ radarr_api_key }}"
+      register: r_api
+      until: r_api.status == 200
+      retries: 20
+      delay: 5
+
+    - name: Radarr - Add Root Folder
+      uri:
+        url: "http://localhost:7878/api/v3/rootfolder"
+        method: POST
+        headers: { X-Api-Key: "{{ radarr_api_key }}" }
+        body_format: json
+        status_code: [201, 400]
+        body:
+          path: "/data/movies"
+
+    - name: Radarr - Add Remote Path Mapping
+      uri:
+        url: "http://localhost:7878/api/v3/remotepathmapping"
+        method: POST
+        headers: { X-Api-Key: "{{ radarr_api_key }}" }
+        body_format: json
+        status_code: [201, 400]
+        body:
+          host: "qbittorrent"
+          remotePath: "/downloads"
+          localPath: "/data/downloads"
+
+    - name: Radarr - Add qBittorrent
+      uri:
+        url: "http://localhost:7878/api/v3/downloadclient"
+        method: POST
+        headers: { X-Api-Key: "{{ radarr_api_key }}" }
+        body_format: json
+        status_code: [201, 400]
+        body:
+          name: "qBittorrent"
+          priority: 25
+          enable: true
+          implementation: "QBittorrent"
+          configContract: "QBittorrentSettings"
+          fields:
+            - { name: "host", value: "qbittorrent" }
+            - { name: "port", value: 8080 }
+            - { name: "username", value: "admin" }
+            - { name: "password", value: "adminadmin" }
+
+    - name: Radarr - Add Indexer YTS
+      uri:
+        url: "http://localhost:7878/api/v3/indexer"
+        method: POST
+        headers: { X-Api-Key: "{{ radarr_api_key }}" }
+        body_format: json
+        status_code: [201, 400]
+        body:
+          name: "YTS"
+          priority: 25
+          enable: true
+          enableRss: true
+          enableAutomaticSearch: true
+          enableInteractiveSearch: true
+          implementation: "Torznab"
+          configContract: "TorznabSettings"
+          fields:
+            - { name: "baseUrl", value: "http://jackett:9117/api/v2.0/indexers/yts/results/torznab/" }
+            - { name: "apiKey", value: "{{ jackett_api_key }}" }
+            - { name: "categories", value: [2000, 2010, 2020, 2030, 2040, 2045, 2050, 2060] }
+
+    - name: Radarr - Add Indexer TorrentGalaxy
+      uri:
+        url: "http://localhost:7878/api/v3/indexer"
+        method: POST
+        headers: { X-Api-Key: "{{ radarr_api_key }}" }
+        body_format: json
+        status_code: [201, 400]
+        body:
+          name: "TorrentGalaxy"
+          priority: 25
+          enable: true
+          enableRss: true
+          enableAutomaticSearch: true
+          enableInteractiveSearch: true
+          implementation: "Torznab"
+          configContract: "TorznabSettings"
+          fields:
+            - { name: "baseUrl", value: "http://jackett:9117/api/v2.0/indexers/torrentgalaxyclone/results/torznab/" }
+            - { name: "apiKey", value: "{{ jackett_api_key }}" }
+            - { name: "categories", value: [2000, 2010, 2020, 2030, 2040, 2045, 2050, 2060] }
+
+    # ==========================================
+    # --- ZERO-TOUCH API KONFIGURACE SONARRU ---
+    # ==========================================
+    - name: Wait for Sonarr API to be ready
+      uri:
+        url: "http://localhost:8989/api/v3/system/status"
+        headers:
+          X-Api-Key: "{{ sonarr_api_key }}"
+      register: s_api
+      until: s_api.status == 200
+      retries: 30
+      delay: 5
+
+    - name: Sonarr - Add Root Folder
+      uri:
+        url: "http://localhost:8989/api/v3/rootfolder"
+        method: POST
+        headers: { X-Api-Key: "{{ sonarr_api_key }}" }
+        body_format: json
+        status_code: [201, 400]
+        body:
+          path: "/data/tv"
+
+    - name: Sonarr - Add Remote Path Mapping
+      uri:
+        url: "http://localhost:8989/api/v3/remotepathmapping"
+        method: POST
+        headers: { X-Api-Key: "{{ sonarr_api_key }}" }
+        body_format: json
+        status_code: [201, 400]
+        body:
+          host: "qbittorrent"
+          remotePath: "/downloads"
+          localPath: "/data/downloads"
+
+    - name: Sonarr - Add qBittorrent
+      uri:
+        url: "http://localhost:8989/api/v3/downloadclient"
+        method: POST
+        headers: { X-Api-Key: "{{ sonarr_api_key }}" }
+        body_format: json
+        status_code: [201, 400]
+        body:
+          name: "qBittorrent"
+          priority: 25
+          enable: true
+          implementation: "QBittorrent"
+          configContract: "QBittorrentSettings"
+          fields:
+            - { name: "host", value: "qbittorrent" }
+            - { name: "port", value: 8080 }
+            - { name: "username", value: "admin" }
+            - { name: "password", value: "adminadmin" }
+
+    - name: Sonarr - Add Indexer TorrentGalaxy TV
+      uri:
+        url: "http://localhost:8989/api/v3/indexer"
+        method: POST
+        headers: { X-Api-Key: "{{ sonarr_api_key }}" }
+        body_format: json
+        status_code: [201, 400]
+        body:
+          name: "TorrentGalaxy TV"
+          priority: 25
+          enable: true
+          enableRss: true
+          enableAutomaticSearch: true
+          enableInteractiveSearch: true
+          implementation: "Torznab"
+          configContract: "TorznabSettings"
+          fields:
+            - { name: "baseUrl", value: "http://jackett:9117/api/v2.0/indexers/torrentgalaxyclone/results/torznab/" }
+            - { name: "apiKey", value: "{{ jackett_api_key }}" }
+            - { name: "categories", value: [5000, 5030, 5040, 5070] }
+
+    - name: Sonarr - Add Indexer Nyaa
+      uri:
+        url: "http://localhost:8989/api/v3/indexer"
+        method: POST
+        headers: { X-Api-Key: "{{ sonarr_api_key }}" }
+        body_format: json
+        status_code: [201, 400]
+        body:
+          name: "Nyaa"
+          priority: 25
+          enable: true
+          enableRss: true
+          enableAutomaticSearch: true
+          enableInteractiveSearch: true
+          implementation: "Torznab"
+          configContract: "TorznabSettings"
+          fields:
+            - { name: "baseUrl", value: "http://jackett:9117/api/v2.0/indexers/nyaasi/results/torznab/" }
+            - { name: "apiKey", value: "{{ jackett_api_key }}" }
+            - { name: "categories", value: [5000, 5070] }

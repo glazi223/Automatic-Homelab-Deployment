@@ -1,0 +1,231 @@
+---
+- name: Prepare Proxmox host
+  hosts: proxmox
+  tasks:
+    - name: Force cleanup of all third-party and enterprise repos
+      shell: "rm -rf /etc/apt/sources.list.d/*"
+
+    - name: Set up clean Debian and Proxmox No-Sub repos
+      shell: |
+        echo "deb http://deb.debian.org/debian {{ ansible_distribution_release }} main contrib non-free-firmware" > /etc/apt/sources.list
+        echo "deb http://download.proxmox.com/debian/pve {{ ansible_distribution_release }} pve-no-subscription" > /etc/apt/sources.list.d/pve-no-sub.list
+
+    - name: Install required python libraries
+      apt:
+        name:
+          - python3-proxmoxer
+          - python3-requests
+        state: present
+        update_cache: yes
+
+    - name: Update Proxmox container template list
+      command: pveam update
+      changed_when: false
+
+    - name: Download Ubuntu 22.04 LXC template
+      command: pveam download local ubuntu-22.04-standard_22.04-1_amd64.tar.zst
+      args:
+        creates: /var/lib/vz/template/cache/ubuntu-22.04-standard_22.04-1_amd64.tar.zst
+
+- name: Provision Homelab Infrastructure on Proxmox
+  hosts: proxmox
+  gather_facts: false
+  tasks:
+
+    # ==========================================================================
+    # LXC CONTAINERS
+    # ==========================================================================
+    - name: Create Nextcloud LXC
+      community.general.proxmox:
+        api_user: "{{ api_user }}"
+        api_password: "{{ api_password }}"
+        api_host: "{{ proxmox_host }}"
+        node: "{{ proxmox_node }}"
+        vmid: "{{ hostvars['nextcloud_ct']['vmid'] }}"
+        hostname: "{{ hostvars['nextcloud_ct']['hostname'] }}"
+        password: "{{ ansible_ssh_pass }}"
+        ostemplate: 'local:vztmpl/ubuntu-22.04-standard_22.04-1_amd64.tar.zst'
+        storage: local-lvm
+        disk: "local-lvm:30"
+        unprivileged: yes
+        features:
+          - nesting=1
+        netif:
+          net0: "name=eth0,bridge=vmbr0,ip={{ hostvars['nextcloud_ct']['ansible_host'] }}/24,gw={{ gateway }}"
+        memory: "{{ hostvars['nextcloud_ct']['memory'] }}"
+        cores: "{{ hostvars['nextcloud_ct']['cores'] }}"
+        state: present
+
+    - name: Set AppArmor unconfined for Nextcloud LXC
+      lineinfile:
+        path: "/etc/pve/lxc/{{ hostvars['nextcloud_ct']['vmid'] }}.conf"
+        line: "lxc.apparmor.profile: unconfined"
+        create: yes
+
+    - name: Start Nextcloud LXC
+      community.general.proxmox:
+        api_user: "{{ api_user }}"
+        api_password: "{{ api_password }}"
+        api_host: "{{ proxmox_host }}"
+        node: "{{ proxmox_node }}"
+        vmid: "{{ hostvars['nextcloud_ct']['vmid'] }}"
+        hostname: "{{ hostvars['nextcloud_ct']['hostname'] }}"
+        state: started
+
+    - name: Wait for Nextcloud LXC to finish booting
+      pause:
+        seconds: 10
+
+    - name: Enable SSH password auth in Nextcloud LXC
+      command: >
+        pct exec {{ hostvars['nextcloud_ct']['vmid'] }} -- bash -c
+        "mkdir -p /run/sshd &&
+        echo 'd /run/sshd 0755 root root -' > /etc/tmpfiles.d/sshd.conf &&
+        echo 'root:{{ ansible_ssh_pass }}' | chpasswd &&
+        sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config &&
+        sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config &&
+        systemctl restart ssh"
+
+    - name: Create AdGuard LXC
+      community.general.proxmox:
+        api_user: "{{ api_user }}"
+        api_password: "{{ api_password }}"
+        api_host: "{{ proxmox_host }}"
+        node: "{{ proxmox_node }}"
+        vmid: "{{ hostvars['adguard_ct']['vmid'] }}"
+        hostname: "{{ hostvars['adguard_ct']['hostname'] }}"
+        password: "{{ ansible_ssh_pass }}"
+        ostemplate: 'local:vztmpl/ubuntu-22.04-standard_22.04-1_amd64.tar.zst'
+        storage: local-lvm
+        unprivileged: yes
+        features:
+          - nesting=1
+        netif:
+          net0: "name=eth0,bridge=vmbr0,ip={{ hostvars['adguard_ct']['ansible_host'] }}/24,gw={{ gateway }}"
+        memory: "{{ hostvars['adguard_ct']['memory'] }}"
+        cores: "{{ hostvars['adguard_ct']['cores'] }}"
+        state: present
+
+    - name: Start AdGuard LXC
+      community.general.proxmox:
+        api_user: "{{ api_user }}"
+        api_password: "{{ api_password }}"
+        api_host: "{{ proxmox_host }}"
+        node: "{{ proxmox_node }}"
+        vmid: "{{ hostvars['adguard_ct']['vmid'] }}"
+        hostname: "{{ hostvars['adguard_ct']['hostname'] }}"
+        state: started
+
+    - name: Wait for AdGuard LXC to finish booting
+      pause:
+        seconds: 10
+
+    - name: Enable SSH password auth in AdGuard LXC
+      command: >
+        pct exec {{ hostvars['adguard_ct']['vmid'] }} -- bash -c
+        "mkdir -p /run/sshd &&
+        echo 'd /run/sshd 0755 root root -' > /etc/tmpfiles.d/sshd.conf &&
+        echo 'root:{{ ansible_ssh_pass }}' | chpasswd &&
+        sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config &&
+        sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config &&
+        systemctl restart ssh"
+
+    # ==========================================================================
+    # VIRTUAL MACHINES
+    # ==========================================================================
+    - name: Clone Media VM from Template
+      community.general.proxmox_kvm:
+        api_user: "{{ api_user }}"
+        api_password: "{{ api_password }}"
+        api_host: "{{ proxmox_host }}"
+        node: "{{ proxmox_node }}"
+        name: "{{ hostvars['media_vm']['hostname'] }}"
+        vmid: 8000
+        newid: "{{ hostvars['media_vm']['vmid'] }}"
+        clone: "ubuntu-template"
+        full: yes
+        storage: local-lvm
+        state: present
+
+    - name: Configure Media VM hardware + cloud-init
+      community.general.proxmox_kvm:
+        api_user: "{{ api_user }}"
+        api_password: "{{ api_password }}"
+        api_host: "{{ proxmox_host }}"
+        node: "{{ proxmox_node }}"
+        vmid: "{{ hostvars['media_vm']['vmid'] }}"
+        ciuser: "{{ ansible_user }}"
+        cipassword: "{{ ansible_ssh_pass }}"
+        memory: "{{ hostvars['media_vm']['memory'] }}"
+        cores: "{{ hostvars['media_vm']['cores'] }}"
+        net: '{"net0":"virtio,bridge=vmbr0"}'
+        ipconfig: '{"ipconfig0":"ip={{ hostvars.media_vm.ansible_host }}/24,gw={{ gateway }}"}'
+        update: yes
+        state: present
+
+    - name: Start Media VM
+      community.general.proxmox_kvm:
+        api_user: "{{ api_user }}"
+        api_password: "{{ api_password }}"
+        api_host: "{{ proxmox_host }}"
+        node: "{{ proxmox_node }}"
+        vmid: "{{ hostvars['media_vm']['vmid'] }}"
+        state: started
+
+    - name: Clone Minecraft VM from Template
+      community.general.proxmox_kvm:
+        api_user: "{{ api_user }}"
+        api_password: "{{ api_password }}"
+        api_host: "{{ proxmox_host }}"
+        node: "{{ proxmox_node }}"
+        name: "{{ hostvars['minecraft_vm']['hostname'] }}"
+        vmid: 8000
+        newid: "{{ hostvars['minecraft_vm']['vmid'] }}"
+        clone: "ubuntu-template"
+        full: yes
+        storage: local-lvm
+        state: present
+      when: install_minecraft | bool
+
+    - name: Configure Minecraft VM hardware + cloud-init
+      community.general.proxmox_kvm:
+        api_user: "{{ api_user }}"
+        api_password: "{{ api_password }}"
+        api_host: "{{ proxmox_host }}"
+        node: "{{ proxmox_node }}"
+        vmid: "{{ hostvars['minecraft_vm']['vmid'] }}"
+        ciuser: "{{ ansible_user }}"
+        cipassword: "{{ ansible_ssh_pass }}"
+        memory: "{{ hostvars['minecraft_vm']['memory'] }}"
+        cores: "{{ hostvars['minecraft_vm']['cores'] }}"
+        net: '{"net0":"virtio,bridge=vmbr0"}'
+        ipconfig: '{"ipconfig0":"ip={{ hostvars.minecraft_vm.ansible_host }}/24,gw={{ gateway }}"}'
+        update: yes
+        state: present
+      when: install_minecraft | bool
+
+    - name: Start Minecraft VM
+      community.general.proxmox_kvm:
+        api_user: "{{ api_user }}"
+        api_password: "{{ api_password }}"
+        api_host: "{{ proxmox_host }}"
+        node: "{{ proxmox_node }}"
+        vmid: "{{ hostvars['minecraft_vm']['vmid'] }}"
+        state: started
+      when: install_minecraft | bool
+
+    # ==========================================================================
+    # WAIT FOR EVERYTHING TO BE REACHABLE
+    # ==========================================================================
+    - name: Wait for all hosts to be reachable via SSH
+      wait_for:
+        host: "{{ item }}"
+        port: 22
+        delay: 10
+        timeout: 300
+      loop:
+        - "{{ hostvars['nextcloud_ct']['ansible_host'] }}"
+        - "{{ hostvars['adguard_ct']['ansible_host'] }}"
+        - "{{ hostvars['media_vm']['ansible_host'] }}"
+        - "{{ hostvars['minecraft_vm']['ansible_host'] }}"
+      when: (item != hostvars['minecraft_vm']['ansible_host']) or (install_minecraft | default('true') | bool)

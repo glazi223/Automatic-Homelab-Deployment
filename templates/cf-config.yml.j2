@@ -1,0 +1,12 @@
+ingress:
+  - hostname: storage.{{ domain_name }}
+    service: http://{{ hostvars['nextcloud_ct']['ansible_host'] }}:80
+  - hostname: dns.{{ domain_name }}
+    service: http://{{ hostvars['adguard_ct']['ansible_host'] }}:80
+  - hostname: media.{{ domain_name }}
+    service: http://localhost:8096
+  - hostname: movies.{{ domain_name }}
+    service: http://localhost:7878
+  - hostname: shows.{{ domain_name }}
+    service: http://localhost:8989
+  - service: http_status:404

@@ -1,0 +1,16 @@
+schema_version: 27  # <--- Tímhle AdGuardu řekneš "Už jsem nastavený"
+http:
+  address: 0.0.0.0:80
+  session_ttl: 720h
+bind_host: 0.0.0.0
+bind_port: 80
+dns:
+  bind_hosts:
+    - 0.0.0.0
+  port: 53
+  upstream_dns:
+    - https://dns.cloudflare.com/dns-query
+    - 1.1.1.1
+users:
+  - name: "{{ admin_user }}"
+    password: "{{ adguard_hash_result.stdout }}"
