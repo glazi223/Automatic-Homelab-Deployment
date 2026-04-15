@@ -59,7 +59,7 @@
       shell: "python3 -c 'import bcrypt; print(bcrypt.hashpw(b\"{{ admin_password }}\", bcrypt.gensalt()).decode())'"
       register: adguard_hash_result
       delegate_to: localhost
-      become: no  # <--- Tohle je důležité! Spustí se to pod tvým uživatelem bez sudo.
+      become: no  
       run_once: true
 
     - name: Deploy AdGuardHome.yaml from template
@@ -69,7 +69,6 @@
         owner: root
         group: root
         mode: '0644'
-      # Tady become: yes nechej (zdědí se z vrchu), protože na kontejneru zápis do /opt práva vyžaduje.
 
     - name: Ensure correct permissions
       file:
@@ -219,7 +218,7 @@
         - /opt/media/sonarr/config
         - /opt/media/jackett/config
         - /opt/media/jackett/config/Jackett/Indexers
-        - /opt/media/qbittorrent/config/qBittorrent # Důležité pro konfig qbitu
+        - /opt/media/qbittorrent/config/qBittorrent 
 
     - name: Deploy application configs from templates
       template:
@@ -236,7 +235,7 @@
     - name: Copy Jackett Indexers
       copy:
         src: ../files/indexers/
-        dest: /opt/media/jackett/config/Jackett/Indexers/ # <-- Přidáno /Jackett/
+        dest: /opt/media/jackett/config/Jackett/Indexers/ 
         mode: '0644'
 
     - name: Start Media Stack via Docker Compose
@@ -315,7 +314,7 @@
           name: "{{ item }}.{{ domain_name }}"
           content: "{{ tunnel_id }}.cfargotunnel.com"
           proxied: true
-        status_code: [200, 400]  # 400 = already exists, that's fine
+        status_code: [200, 400] 
       loop:
         - storage
         - dns
