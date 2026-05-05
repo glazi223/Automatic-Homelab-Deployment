@@ -2,7 +2,7 @@
 all:
   vars:
     gateway: "192.168.1.1"           # Usually this but can be found from the terminal with ipconfig (windows) ip route (linux)
-    system_timezone: "Europe/Prague" # Set your timezone
+    system_timezone: "TIMEZONE" # Set your timezone
     
     # --- 1. PROXMOX SERVER ---
     # ========================================================================
